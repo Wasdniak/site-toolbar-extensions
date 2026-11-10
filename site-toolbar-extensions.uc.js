@@ -20,6 +20,7 @@
   const PREF_ENABLED = PREFIX + "enabled"; // bool, default true
   const PREF_ANIMATE = PREFIX + "animate"; // bool, default true
   const PREF_RULES = PREFIX + "rules";     // JSON string
+  const PREF_DRAG = PREFIX + "drag";       // bool, default true: hold and drag to reorder
   const PREFS = [PREF_ENABLED, PREF_ANIMATE, PREF_RULES];
   const DEFAULT_RULES = {
     "x-posed@xaitax.com": ["x.com", "twitter.com"],
@@ -57,6 +58,16 @@
   ];
   const OUT_POSE = `translateY(${DROP}px) rotate(4deg)`;
 
+  // Hold-to-drag reordering.
+  const DRAGGING = "ste-dragging";
+  const SHIFTING = "ste-shifting";
+  const HOLD_MS = 350;     // press this long without moving to pick a button up
+  const SLOP_PX = 5;       // moving further than this before then is a normal click/drag
+  const LIFT_SCALE = 1.08;
+  const SHIFT_MS = 180;    // neighbours sliding aside
+  const DROP_MS = 320;     // the dropped button settling, with the same overshoot curve as Zia's spring
+  const SPRING = "cubic-bezier(0.3, 1.4, 0.5, 1)";
+
   const CSS = `
     [${HIDDEN}] { display: none !important; }
     /* While animating, the button is clipped at the bottom edge of its visible button, so
@@ -72,6 +83,17 @@
     [${ANIMATING}] > * {
       flex-shrink: 0 !important;
       transform-origin: 50% 50%;
+    }
+    /* A picked-up button floats above its neighbours. */
+    [${DRAGGING}] {
+      position: relative;
+      z-index: 10;
+      filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.35));
+      cursor: grabbing !important;
+    }
+    [${DRAGGING}] * { cursor: grabbing !important; }
+    [${SHIFTING}] {
+      transition: translate ${SHIFT_MS}ms cubic-bezier(0.2, 0, 0, 1);
     }
   `;
   const SHEET = "data:text/css;charset=utf-8," + encodeURIComponent(CSS);
@@ -369,6 +391,8 @@
           continue;
         }
         touched.add(wid);
+        // Leave a button alone while it's being dragged; the drop reschedules this.
+        if (node.hasAttribute(DRAGGING)) continue;
         if (st.shown === show) continue;
         st.shown = show;
         if (instant || node.hasAttribute("overflowedItem")) setInstant(node, st, show);
@@ -389,6 +413,212 @@
         apply();
       }, 0);
     };
+
+    // ---- Hold to drag ---------------------------------------------------------------------------
+    //
+    // Press an extension button for HOLD_MS without moving and it lifts; drag it along the
+    // other visible extension buttons and they slide aside; let go and it moves there. The new
+    // order is saved through CustomizableUI, the same as Customize Toolbar, so it's shared by
+    // every window and survives restarts. Escape puts it back.
+
+    const dragOn = () => Services.prefs.getBoolPref(PREF_DRAG, true);
+    const isExtItem = (el) => el?.nodeType === 1 && el.id?.endsWith("-browser-action");
+
+    let hold = null; // { node, pointerId, x, y, timer }
+    let drag = null; // see beginDrag
+
+    function itemFrom(target) {
+      for (let el = target; el && el.nodeType === 1; el = el.parentElement) {
+        if (isExtItem(el)) return toolbarNode(el.id) === el ? el : null;
+        if (el.localName === "toolbar") return null;
+      }
+      return null;
+    }
+
+    // The visible, settled extension buttons next to `node`, in toolbar order.
+    function rowOf(node) {
+      return [...node.parentNode.children].filter((el) =>
+        isExtItem(el) && !el.hasAttribute(HIDDEN) && !el.hasAttribute("overflowedItem") &&
+        el.getBoundingClientRect().width > 0);
+    }
+
+    function onPointerDown(e) {
+      if (e.button !== 0 || !e.isPrimary || drag || !dragOn() || customizing()) return;
+      const node = itemFrom(e.target);
+      if (!node) return;
+      cancelHold();
+      hold = {
+        node, pointerId: e.pointerId, x: e.screenX, y: e.screenY,
+        timer: setTimeout(() => beginDrag(), HOLD_MS),
+      };
+    }
+
+    function cancelHold() {
+      if (hold) clearTimeout(hold.timer);
+      hold = null;
+    }
+
+    function beginDrag() {
+      const { node, pointerId, x } = hold;
+      hold = null;
+      const row = rowOf(node);
+      const st = states.get(node);
+      // Nothing to reorder against, or something is still sinking or rising.
+      if (row.length < 2 || !row.includes(node) || row.some((el) => el.hasAttribute(ANIMATING)) ||
+          (st && st.anims.length)) {
+        return;
+      }
+      const rects = row.map((el) => el.getBoundingClientRect());
+      const from = row.indexOf(node);
+      const gap = parseFloat(getComputedStyle(node.parentNode).columnGap) || 0;
+      const cs = getComputedStyle(node);
+      drag = {
+        node, pointerId, startX: x, row, rects, from, to: from, dx: 0,
+        slot: rects[from].width + parseFloat(cs.marginInlineStart) + parseFloat(cs.marginInlineEnd) + gap,
+        minDx: rects[0].left - rects[from].left,
+        maxDx: rects.at(-1).right - rects[from].right,
+      };
+      try { node.setPointerCapture(pointerId); } catch {}
+      // The extension's own popup must not open for this press.
+      window.addEventListener("click", swallow, true);
+      window.addEventListener("command", swallow, true);
+      window.addEventListener("keydown", onDragKey, true);
+      node.setAttribute(DRAGGING, "");
+      for (const el of row) if (el !== node) el.setAttribute(SHIFTING, "");
+      setLift(node, true);
+    }
+
+    // The lift scales the button's contents, not the button: Firefox decides whether the
+    // toolbar overflows by adding up its buttons' on-screen widths, and a scaled button would
+    // tip it over and push buttons into the overflow menu.
+    function setLift(node, up) {
+      for (const kid of node.children) {
+        if (up && !reducedMotion.matches) {
+          kid.animate([{ scale: "1" }, { scale: String(LIFT_SCALE) }], { duration: 120, easing: "ease-out" });
+        }
+        kid.style.scale = up ? String(LIFT_SCALE) : "";
+      }
+    }
+
+    function swallow(e) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+
+    function onPointerMove(e) {
+      if (hold && e.pointerId === hold.pointerId) {
+        if (Math.abs(e.screenX - hold.x) > SLOP_PX || Math.abs(e.screenY - hold.y) > SLOP_PX) cancelHold();
+        return;
+      }
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      e.preventDefault();
+      // A little give past either end, then stop.
+      let dx = e.screenX - drag.startX;
+      if (dx < drag.minDx) dx = drag.minDx - Math.min(12, (drag.minDx - dx) / 4);
+      if (dx > drag.maxDx) dx = drag.maxDx + Math.min(12, (dx - drag.maxDx) / 4);
+      drag.dx = dx;
+      drag.node.style.translate = `${dx}px 0`;
+
+      // Where it would land: past the middle of a neighbour means swapping with it.
+      const { rects, from } = drag;
+      const center = rects[from].left + rects[from].width / 2 + dx;
+      let to = 0;
+      for (let i = 0; i < rects.length; i++) {
+        if (i !== from && rects[i].left + rects[i].width / 2 < center) to++;
+      }
+      if (to === drag.to) return;
+      drag.to = to;
+      drag.row.forEach((el, i) => {
+        if (el === drag.node) return;
+        let shift = 0;
+        if (from < to && i > from && i <= to) shift = -drag.slot;
+        else if (to < from && i >= to && i < from) shift = drag.slot;
+        el.style.translate = shift ? `${shift}px 0` : "";
+      });
+    }
+
+    function onPointerUp(e) {
+      if (hold && e.pointerId === hold.pointerId) {
+        cancelHold();
+        return;
+      }
+      if (drag && e.pointerId === drag.pointerId) {
+        endDrag(true);
+      } else if (awaitingRelease) {
+        // Cancelled with Escape while still pressed: this is that press's release.
+        stopSwallowing();
+      }
+    }
+
+    // A pickup's own release fires a click (and the extension's command) after pointerup,
+    // so clicks stay blocked until just after the release. Cancelling with Escape happens
+    // before the release, so then it waits for it, with a fallback in case it never comes.
+    let awaitingRelease = 0;
+    function stopSwallowing(wait = 0) {
+      clearTimeout(awaitingRelease);
+      awaitingRelease = 0;
+      setTimeout(() => {
+        window.removeEventListener("click", swallow, true);
+        window.removeEventListener("command", swallow, true);
+      }, wait);
+    }
+
+    function onDragKey(e) {
+      if (e.key !== "Escape") return;
+      swallow(e);
+      endDrag(false);
+    }
+
+    function endDrag(commit) {
+      const { node, row, from, to, pointerId } = drag;
+      drag = null;
+      try { node.releasePointerCapture(pointerId); } catch {}
+      window.removeEventListener("keydown", onDragKey, true);
+      if (commit) stopSwallowing();
+      else awaitingRelease = setTimeout(() => stopSwallowing(), 5000);
+
+      // Where everything is drawn right now, to animate from (FLIP).
+      const before = new Map(row.map((el) => [el, el.getBoundingClientRect().left]));
+
+      if (commit && to !== from) {
+        const wid = node.id;
+        const area = CustomizableUI.getPlacementOfWidget(wid)?.area;
+        const others = row.filter((el) => el !== node);
+        const ids = CustomizableUI.getWidgetIdsInArea(area);
+        // CustomizableUI's position is an index into the current list, and it allows for the
+        // widget's own old slot, so "before X" is X's index and "after X" is X's index + 1.
+        const pos = to < others.length ? ids.indexOf(others[to].id) : ids.indexOf(others.at(-1).id) + 1;
+        if (pos >= 0) CustomizableUI.moveWidgetWithinArea(wid, pos);
+      }
+
+      for (const el of row) {
+        el.removeAttribute(SHIFTING);
+        el.style.translate = "";
+      }
+      node.removeAttribute(DRAGGING);
+      setLift(node, false);
+
+      if (!reducedMotion.matches) {
+        for (const el of row) {
+          const dx = before.get(el) - el.getBoundingClientRect().left;
+          if (el === node) {
+            el.animate([{ translate: `${dx}px 0` }, { translate: "0 0" }], { duration: DROP_MS, easing: SPRING });
+            for (const kid of el.children) {
+              kid.animate([{ scale: String(LIFT_SCALE) }, { scale: "1" }], { duration: DROP_MS, easing: SPRING });
+            }
+          } else if (Math.abs(dx) > 0.5) {
+            el.animate([{ translate: `${dx}px 0` }, { translate: "0 0" }],
+              { duration: SHIFT_MS, easing: "cubic-bezier(0.2, 0, 0, 1)" });
+          }
+        }
+      }
+      schedule();
+    }
+
+    function stopDragging() {
+      cancelHold();
+      if (drag) endDrag(false);
+    }
 
     // ---- Context menu ---------------------------------------------------------------------------
 
@@ -510,6 +740,11 @@
     CustomizableUI.addListener(cuiListener);
     for (const p of PREFS) Services.prefs.addObserver(p, onPref);
     document.addEventListener("popupshowing", onPopupShowingCapture, true);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("pointermove", onPointerMove, true);
+    window.addEventListener("pointerup", onPointerUp, true);
+    window.addEventListener("pointercancel", stopDragging, true);
+    window.addEventListener("blur", stopDragging);
     apply();
 
     function teardown() {
@@ -519,6 +754,13 @@
       CustomizableUI.removeListener(cuiListener);
       for (const p of PREFS) Services.prefs.removeObserver(p, onPref);
       document.removeEventListener("popupshowing", onPopupShowingCapture, true);
+      stopDragging();
+      stopSwallowing();
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", onPointerUp, true);
+      window.removeEventListener("pointercancel", stopDragging, true);
+      window.removeEventListener("blur", stopDragging);
     }
     window.addEventListener("unload", teardown, { once: true });
 

@@ -19,9 +19,18 @@ Switching tabs or navigating swaps the buttons. Leaving buttons sink down throug
 - Customize Toolbar shows every button.
 - Extensions stay in the puzzle-piece panel on every site.
 
+## Rearranging
+
+Press and hold an extension button for a moment and it lifts. Drag it left or right, and the other extension buttons slide out of the way. Let go to drop it there. Press Escape while holding to put it back.
+
+- A quick click still opens the extension as usual. Moving the mouse before the button lifts also counts as a normal click.
+- The new order is saved the same way Customize Toolbar saves it, so it applies to every window and survives restarts.
+- You arrange the buttons you can see. Buttons hidden on the current site keep their places relative to the others.
+- This only applies to extension buttons. Back, Forward and the address bar aren't affected.
+
 ## Settings
 
-In **Settings → Sine Mods → Site Toolbar Extensions** you can turn the filtering or the animation off, or edit the rules as JSON (keyed by extension ID):
+In **Settings → Sine Mods → Site Toolbar Extensions** you can turn the filtering, the animation, or hold-to-drag off, or edit the rules as JSON (keyed by extension ID):
 
 ```json
 { "x-posed@xaitax.com": ["x.com", "twitter.com"] }
