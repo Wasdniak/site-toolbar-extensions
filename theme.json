@@ -1,0 +1,23 @@
+{
+  "id": "site-toolbar-extensions",
+  "name": "Site Toolbar Extensions",
+  "description": "Pinned extension buttons that only show on the sites you pick, with a bounce in and out.",
+  "author": "Wasdniak",
+  "version": "1.0.0",
+  "homepage": "https://github.com/Wasdniak/site-toolbar-extensions",
+  "updatedAt": "2026-11-10T13:43:38.000Z",
+  "fork": [
+    "zen"
+  ],
+  "style": { "chrome": "", "content": "" },
+  "scripts": {
+    "site-toolbar-extensions.uc.js": {
+      "include": [
+        "chrome://browser/content/browser.xhtml"
+      ]
+    }
+  },
+  "preferences": "preferences.json",
+  "readme": "README.md",
+  "supportsUnload": true
+}

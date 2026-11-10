@@ -1,0 +1,5 @@
+[
+  {"type":"checkbox","label":"Show extension buttons only on their sites","property":"sine.site-toolbar-extensions.enabled","defaultValue":true},
+  {"type":"checkbox","label":"Animate buttons in and out","property":"sine.site-toolbar-extensions.animate","defaultValue":true},
+  {"type":"string","label":"Site rules (JSON). Easier: right-click an extension button and pick \"Show on <site>\"","property":"sine.site-toolbar-extensions.rules","defaultValue":"{\"x-posed@xaitax.com\":[\"x.com\",\"twitter.com\"],\"x-like-count-toggle@local.example\":[\"x.com\",\"twitter.com\"]}","placeholder":"{\"extension@id\":[\"example.com\"]}"}
+]
