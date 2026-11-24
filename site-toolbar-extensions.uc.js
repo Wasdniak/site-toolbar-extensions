@@ -440,12 +440,27 @@
         const row = document.createElement("unified-extensions-item");
         row.setExtension(extension);
         row.classList.add(PANEL_ROW);
-        list.append(row);
+        list.append(row); // renders it, which disables (greys out) its main button
+        // Firefox only enables that button for extensions that need a permission grant. Here a
+        // click opens the extension's menu instead, the same one its ⋯ button opens.
+        const button = row.querySelector(".unified-extensions-item-action-button");
+        if (button) {
+          button.disabled = false;
+          button.setAttribute("closemenu", "none"); // keep the panel open, like the ⋯ button
+          button.addEventListener("command", openRowMenu, true);
+        }
       }
       // With every other extension pinned, Firefox would show its "no extensions" message.
       if (extensions.length) {
         try { gUnifiedExtensions._updateEmptyStateBox({ panelview: view, hidden: true }); } catch {}
       }
+    }
+
+    function openRowMenu(e) {
+      // Firefox's own handler would grant the extension access to the tab; this row is a menu.
+      e.stopImmediatePropagation();
+      document.getElementById("unified-extensions-context-menu")
+        ?.openPopup(e.target, "after_end", 0, 0, true, false, e);
     }
 
     const onViewShowing = (e) => {
