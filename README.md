@@ -17,7 +17,7 @@ Switching tabs or navigating swaps the buttons. Leaving buttons sink down throug
 - Switching sites only hides buttons, it doesn't unpin them, so toolbar order and pins are kept.
 - Pages that aren't websites (`about:`, new tab, settings) show only the extensions without site lists.
 - Customize Toolbar shows every button.
-- Extensions stay in the puzzle-piece panel on every site.
+- A pinned extension that's hidden on the current site is listed in the extensions panel (Zen's site panel, or the puzzle-piece panel) while it's hidden. Right-click it there and pick **Show on _site_** to add the site you're on, for example to show a shopping extension on Amazon as well as Walmart.
 
 ## Rearranging
 

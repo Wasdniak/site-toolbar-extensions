@@ -403,7 +403,60 @@
       // Arrivals wait for the leavers to sink, then open while the leavers close.
       const wait = out.length ? SINK_MS : 0;
       into.forEach(([node, st], i) => animateIn(node, st, wait + i * STAGGER_MS));
+      if (openView) fillPanel(openView);
     }
+
+    // ---- Extensions panel -----------------------------------------------------------------------
+    //
+    // Firefox's extensions (puzzle) panel leaves out pinned extensions, since their buttons are
+    // on the toolbar. One this mod hides on the current site would be out of reach, so it gets a
+    // row in the panel's list while it's hidden. The row is Firefox's own panel item, so its ⋯
+    // button and right-click open the usual menu, with "Show on <site>". The row has no id:
+    // the toolbar button keeps its widget id to itself.
+
+    const PANEL_ROW = "ste-panel-row";
+    let openView = null;
+
+    function hiddenHereExtensions() {
+      const host = currentHost();
+      const found = [];
+      for (const extId of Object.keys(rules)) {
+        if (unpinning.has(extId)) continue; // about to move into the panel for real
+        const node = toolbarNode(widgetIdFor(extId));
+        if (!node || node.hasAttribute("overflowedItem")) continue; // overflowed ones are listed already
+        const policy = WebExtensionPolicy.getByID(extId);
+        if (!policy?.extension || !policy.canAccessWindow(window)) continue;
+        if (!shouldShow(extId, host)) found.push(policy.extension);
+      }
+      return found.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    function fillPanel(view) {
+      const list = view.querySelector(".unified-extensions-list");
+      if (!list) return;
+      for (const row of list.querySelectorAll(`.${PANEL_ROW}`)) row.remove();
+      const extensions = hiddenHereExtensions();
+      for (const extension of extensions) {
+        const row = document.createElement("unified-extensions-item");
+        row.setExtension(extension);
+        row.classList.add(PANEL_ROW);
+        list.append(row);
+      }
+      // With every other extension pinned, Firefox would show its "no extensions" message.
+      if (extensions.length) {
+        try { gUnifiedExtensions._updateEmptyStateBox({ panelview: view, hidden: true }); } catch {}
+      }
+    }
+
+    const onViewShowing = (e) => {
+      if (e.target.id !== "unified-extensions-view") return;
+      openView = e.target;
+      // After Firefox has built its own list for this showing.
+      queueMicrotask(() => openView === e.target && fillPanel(e.target));
+    };
+    const onViewHiding = (e) => {
+      if (e.target.id === "unified-extensions-view") openView = null;
+    };
 
     let queued = 0;
     const schedule = () => {
@@ -745,6 +798,8 @@
     window.addEventListener("pointerup", onPointerUp, true);
     window.addEventListener("pointercancel", stopDragging, true);
     window.addEventListener("blur", stopDragging);
+    document.addEventListener("ViewShowing", onViewShowing, true);
+    document.addEventListener("ViewHiding", onViewHiding, true);
     apply();
 
     function teardown() {
@@ -761,6 +816,8 @@
       window.removeEventListener("pointerup", onPointerUp, true);
       window.removeEventListener("pointercancel", stopDragging, true);
       window.removeEventListener("blur", stopDragging);
+      document.removeEventListener("ViewShowing", onViewShowing, true);
+      document.removeEventListener("ViewHiding", onViewHiding, true);
     }
     window.addEventListener("unload", teardown, { once: true });
 
@@ -778,6 +835,7 @@
       }
       for (const fn of menuCleanups) fn();
       for (const el of added) el.remove();
+      for (const row of document.querySelectorAll(`.${PANEL_ROW}`)) row.remove();
       for (const id of MENUS) document.getElementById(id)?.removeAttribute("ste-hooked");
       try { window.windowUtils.removeSheetUsingURIString(SHEET, window.windowUtils.AUTHOR_SHEET); } catch {}
     }, SCRIPT_URI);
