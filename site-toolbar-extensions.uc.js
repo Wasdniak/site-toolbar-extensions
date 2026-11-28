@@ -69,7 +69,7 @@
   const SPRING = "cubic-bezier(0.3, 1.4, 0.5, 1)";
 
   const CSS = `
-    [${HIDDEN}] { display: none !important; }
+    toolbar [${HIDDEN}] { display: none !important; }
     /* While animating, the button is clipped at the bottom edge of its visible button, so
        the icon passes through it. Zen makes the outer box taller than the toolbar, so its
        own edge would let the icon show over the page; --ste-clip-bottom is the gap, set
@@ -98,18 +98,44 @@
   `;
   const SHEET = "data:text/css;charset=utf-8," + encodeURIComponent(CSS);
 
+  let started = false;
+  let disposed = false;
+  let startupObs = null;
+  let cleanupWindow = null;
+  let cleanupSine = null;
+
+  function removeStartupObs() {
+    if (!startupObs) return;
+    try { Services.obs.removeObserver(startupObs, "browser-delayed-startup-finished"); } catch {}
+    startupObs = null;
+  }
+
+  window.addEventListener("unload", () => {
+    disposed = true;
+    removeStartupObs();
+    cleanupWindow?.();
+  }, { once: true });
+
+  window.addUnloadListener?.(() => {
+    disposed = true;
+    removeStartupObs();
+    cleanupSine?.();
+  }, SCRIPT_URI);
+
   if (window.gBrowserInit?.delayedStartupFinished) {
     start();
   } else {
-    const obs = (subject) => {
+    startupObs = (subject) => {
       if (subject !== window) return;
-      Services.obs.removeObserver(obs, "browser-delayed-startup-finished");
+      removeStartupObs();
       start();
     };
-    Services.obs.addObserver(obs, "browser-delayed-startup-finished");
+    Services.obs.addObserver(startupObs, "browser-delayed-startup-finished");
   }
 
   function start() {
+    if (started || disposed) return;
+    started = true;
     // The module's path has moved between Firefox versions; browser windows always have it.
     const CustomizableUI = window.CustomizableUI;
 
@@ -131,6 +157,9 @@
       }
       try {
         const parsed = JSON.parse(text);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new TypeError("Expected a JSON object");
+        }
         const next = {};
         for (const [extId, sites] of Object.entries(parsed || {})) {
           const list = (Array.isArray(sites) ? sites : [sites]).map(normalizeSite).filter(Boolean);
@@ -208,6 +237,7 @@
     const touched = new Set();
     // extension IDs sinking out before they go back to the extensions panel
     const unpinning = new Set();
+    const unpinTimers = new Set();
 
     // Unchecking an extension's last site: sink it out, then move it back to the extensions
     // panel. Its slot has closed by then, so the move doesn't jump. "Show on every site" is
@@ -215,7 +245,8 @@
     function unpinAfterSink(extId) {
       const wid = widgetIdFor(extId);
       unpinning.add(extId);
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        unpinTimers.delete(timer);
         unpinning.delete(extId);
         if (rules[extId] || !onToolbar(wid)) return schedule();
         // The same node moves to the panel, so clear its hidden state first.
@@ -227,6 +258,7 @@
         }
         CustomizableUI.addWidgetToArea(wid, CustomizableUI.AREA_ADDONS ?? "unified-extensions-area");
       }, SINK_MS + WIDTH_MS + 120);
+      unpinTimers.add(timer);
     }
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -319,11 +351,12 @@
               { duration: SINK_MS * 0.7, delay, easing: "ease-in", fill: "both" })
           : c.animate(SINK, { duration: SINK_MS, delay, easing: "ease-in-out", fill: "both" }));
       if (!(await settled(st.anims)) || st.token !== token) return;
+      if (!node.isConnected || !node.parentNode) return;
 
       const box = from?.box ?? boxOf(node);
       st.anims.push(node.animate([box, zeroBox(node)],
         { duration: WIDTH_MS, easing: "cubic-bezier(0.4, 0, 0.2, 1)", fill: "both" }));
-      if (await settled(st.anims)) finish(node, st, token, true);
+      if ((await settled(st.anims)) && node.isConnected) finish(node, st, token, true);
     }
 
     async function animateIn(node, st, delay) {
@@ -361,25 +394,38 @@
             { duration: RISE_MS, delay: delay + WIDTH_MS * 0.6, easing: "ease-in-out", fill: "both" })),
         ];
       }
-      if (await settled(st.anims)) finish(node, st, token, false);
+      if ((await settled(st.anims)) && node.isConnected) finish(node, st, token, false);
     }
 
     // ---- Apply ----------------------------------------------------------------------------------
 
     function apply() {
       const host = currentHost();
-      const wanted = new Map(); // widget id -> show?
-      for (const extId of Object.keys(rules)) wanted.set(widgetIdFor(extId), null);
-      for (const wid of touched) wanted.set(wid, null);
+      const wanted = new Map(); // widget id -> extId | null
+      for (const extId of Object.keys(rules)) wanted.set(widgetIdFor(extId), extId);
+      for (const wid of touched) if (!wanted.has(wid)) wanted.set(wid, null);
 
       const out = [];
       const into = [];
       const instant = !animateOn() || customizing() || document.hidden;
 
-      for (const wid of wanted.keys()) {
-        const extId = extIdForWidget(wid);
+      for (const [wid, knownExtId] of wanted) {
         const node = toolbarNode(wid);
-        if (!node) continue;
+        if (!node) {
+          if (touched.has(wid) && !onToolbar(wid)) {
+            const stray = document.getElementById(wid);
+            if (stray) {
+              const st = states.get(stray);
+              if (st) { stop(st); states.delete(stray); }
+              stray.removeAttribute(HIDDEN);
+              stray.removeAttribute(ANIMATING);
+              stray.style.removeProperty("--ste-clip-bottom");
+            }
+            touched.delete(wid);
+          }
+          continue;
+        }
+        const extId = knownExtId ?? extIdForWidget(wid);
         const show = extId ? shouldShow(extId, host) : true;
         let st = states.get(node);
         if (!st) {
@@ -453,6 +499,8 @@
       // With every other extension pinned, Firefox would show its "no extensions" message.
       if (extensions.length) {
         try { gUnifiedExtensions._updateEmptyStateBox({ panelview: view, hidden: true }); } catch {}
+      } else if (!list.children.length) {
+        try { gUnifiedExtensions._updateEmptyStateBox({ panelview: view, hidden: false }); } catch {}
       }
     }
 
@@ -503,10 +551,17 @@
       return null;
     }
 
-    // The visible, settled extension buttons next to `node`, in toolbar order.
+    // The visible, settled extension buttons contiguous with `node`, in toolbar order.
     function rowOf(node) {
-      return [...node.parentNode.children].filter((el) =>
-        isExtItem(el) && !el.hasAttribute(HIDDEN) && !el.hasAttribute("overflowedItem") &&
+      const children = [...(node.parentNode?.children || [])];
+      const idx = children.indexOf(node);
+      if (idx < 0) return [];
+      let start = idx;
+      while (start > 0 && isExtItem(children[start - 1])) start--;
+      let end = idx;
+      while (end + 1 < children.length && isExtItem(children[end + 1])) end++;
+      return children.slice(start, end + 1).filter((el) =>
+        !el.hasAttribute(HIDDEN) && !el.hasAttribute("overflowedItem") &&
         el.getBoundingClientRect().width > 0);
     }
 
@@ -529,6 +584,7 @@
     function beginDrag() {
       const { node, pointerId, x } = hold;
       hold = null;
+      if (!node.isConnected || !node.parentNode) return;
       const row = rowOf(node);
       const st = states.get(node);
       // Nothing to reorder against, or something is still sinking or rising.
@@ -542,7 +598,7 @@
       const cs = getComputedStyle(node);
       drag = {
         node, pointerId, startX: x, row, rects, from, to: from, dx: 0,
-        slot: rects[from].width + parseFloat(cs.marginInlineStart) + parseFloat(cs.marginInlineEnd) + gap,
+        slot: rects[from].width + (parseFloat(cs.marginInlineStart) || 0) + (parseFloat(cs.marginInlineEnd) || 0) + gap,
         minDx: rects[0].left - rects[from].left,
         maxDx: rects.at(-1).right - rects[from].right,
       };
@@ -622,10 +678,21 @@
     // so clicks stay blocked until just after the release. Cancelling with Escape happens
     // before the release, so then it waits for it, with a fallback in case it never comes.
     let awaitingRelease = 0;
+    let swallowTimer = 0;
+    function stopSwallowingNow() {
+      clearTimeout(awaitingRelease);
+      awaitingRelease = 0;
+      clearTimeout(swallowTimer);
+      swallowTimer = 0;
+      window.removeEventListener("click", swallow, true);
+      window.removeEventListener("command", swallow, true);
+    }
     function stopSwallowing(wait = 0) {
       clearTimeout(awaitingRelease);
       awaitingRelease = 0;
-      setTimeout(() => {
+      clearTimeout(swallowTimer);
+      swallowTimer = setTimeout(() => {
+        swallowTimer = 0;
         window.removeEventListener("click", swallow, true);
         window.removeEventListener("command", swallow, true);
       }, wait);
@@ -634,15 +701,15 @@
     function onDragKey(e) {
       if (e.key !== "Escape") return;
       swallow(e);
-      endDrag(false);
+      endDrag(false, true);
     }
 
-    function endDrag(commit) {
+    function endDrag(commit, waitForRelease = false) {
       const { node, row, from, to, pointerId } = drag;
       drag = null;
       try { node.releasePointerCapture(pointerId); } catch {}
       window.removeEventListener("keydown", onDragKey, true);
-      if (commit) stopSwallowing();
+      if (commit || !waitForRelease) stopSwallowing();
       else awaitingRelease = setTimeout(() => stopSwallowing(), 5000);
 
       // Where everything is drawn right now, to animate from (FLIP).
@@ -651,12 +718,15 @@
       if (commit && to !== from) {
         const wid = node.id;
         const area = CustomizableUI.getPlacementOfWidget(wid)?.area;
-        const others = row.filter((el) => el !== node);
-        const ids = CustomizableUI.getWidgetIdsInArea(area);
-        // CustomizableUI's position is an index into the current list, and it allows for the
-        // widget's own old slot, so "before X" is X's index and "after X" is X's index + 1.
-        const pos = to < others.length ? ids.indexOf(others[to].id) : ids.indexOf(others.at(-1).id) + 1;
-        if (pos >= 0) CustomizableUI.moveWidgetWithinArea(wid, pos);
+        if (area) {
+          const others = row.filter((el) => el !== node);
+          const ids = CustomizableUI.getWidgetIdsInArea(area);
+          // CustomizableUI's position is an index into the current list, and it allows for the
+          // widget's own old slot, so "before X" is X's index and "after X" is X's index + 1.
+          const targetIdx = to < others.length ? ids.indexOf(others[to].id) : ids.indexOf(others.at(-1).id);
+          const pos = targetIdx >= 0 ? (to < others.length ? targetIdx : targetIdx + 1) : -1;
+          if (pos >= 0) CustomizableUI.moveWidgetWithinArea(wid, pos);
+        }
       }
 
       for (const el of row) {
@@ -761,6 +831,8 @@
     }
 
     const menuCleanups = [];
+    // The unified extensions panel's context menu is built lazily.
+    const onPopupShowingCapture = () => hookMenus();
     function hookMenus() {
       for (const id of MENUS) {
         const popup = document.getElementById(id);
@@ -768,6 +840,9 @@
           popup.setAttribute("ste-hooked", "");
           menuCleanups.push(buildMenu(popup));
         }
+      }
+      if (menuCleanups.length === MENUS.length) {
+        document.removeEventListener("popupshowing", onPopupShowingCapture, true);
       }
     }
 
@@ -797,17 +872,14 @@
       schedule();
     };
 
-    // The unified extensions panel's context menu is built lazily.
-    const onPopupShowingCapture = () => hookMenus();
-
     window.windowUtils.loadSheetUsingURIString(SHEET, window.windowUtils.AUTHOR_SHEET);
     loadRules();
+    document.addEventListener("popupshowing", onPopupShowingCapture, true);
     hookMenus();
     gBrowser.addProgressListener(progress);
     gBrowser.tabContainer.addEventListener("TabSelect", schedule);
     CustomizableUI.addListener(cuiListener);
     for (const p of PREFS) Services.prefs.addObserver(p, onPref);
-    document.addEventListener("popupshowing", onPopupShowingCapture, true);
     window.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("pointermove", onPointerMove, true);
     window.addEventListener("pointerup", onPointerUp, true);
@@ -817,15 +889,20 @@
     document.addEventListener("ViewHiding", onViewHiding, true);
     apply();
 
+    let tornDown = false;
     function teardown() {
+      if (tornDown) return;
+      tornDown = true;
       clearTimeout(queued);
+      for (const id of unpinTimers) clearTimeout(id);
+      unpinTimers.clear();
       gBrowser.removeProgressListener(progress);
       gBrowser.tabContainer.removeEventListener("TabSelect", schedule);
       CustomizableUI.removeListener(cuiListener);
       for (const p of PREFS) Services.prefs.removeObserver(p, onPref);
       document.removeEventListener("popupshowing", onPopupShowingCapture, true);
       stopDragging();
-      stopSwallowing();
+      stopSwallowingNow();
       window.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("pointermove", onPointerMove, true);
       window.removeEventListener("pointerup", onPointerUp, true);
@@ -834,10 +911,10 @@
       document.removeEventListener("ViewShowing", onViewShowing, true);
       document.removeEventListener("ViewHiding", onViewHiding, true);
     }
-    window.addEventListener("unload", teardown, { once: true });
+    cleanupWindow = teardown;
 
     // Sine disable: everything visible again, menus and styles removed.
-    window.addUnloadListener?.(() => {
+    cleanupSine = () => {
       teardown();
       for (const wid of new Set([...touched, ...Object.keys(rules).map(widgetIdFor)])) {
         const node = document.getElementById(wid);
@@ -853,6 +930,6 @@
       for (const row of document.querySelectorAll(`.${PANEL_ROW}`)) row.remove();
       for (const id of MENUS) document.getElementById(id)?.removeAttribute("ste-hooked");
       try { window.windowUtils.removeSheetUsingURIString(SHEET, window.windowUtils.AUTHOR_SHEET); } catch {}
-    }, SCRIPT_URI);
+    };
   }
 })();

@@ -3,9 +3,9 @@
   "name": "Site Toolbar Extensions",
   "description": "Pinned extension buttons that only show on the sites you pick, with a bounce in and out. Press and hold to drag them into a new order.",
   "author": "Wasdniak",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "homepage": "https://github.com/Wasdniak/site-toolbar-extensions",
-  "updatedAt": "2026-11-24T11:24:13.000Z",
+  "updatedAt": "2026-11-28T05:46:00.000Z",
   "fork": [
     "zen"
   ],
